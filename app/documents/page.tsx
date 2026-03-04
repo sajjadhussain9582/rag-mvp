@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/card'
 import { DocumentUpload } from '@/components/document-upload'
 import Link from 'next/link'
 import { format } from 'date-fns'
+import { ArrowLeftIcon } from 'lucide-react'
 
 interface Document {
   id: string
@@ -65,7 +66,7 @@ export default function DocumentsPage() {
 
   return (
     <div className="min-h-screen bg-slate-50 p-8">
-      <div className="mx-auto max-w-4xl space-y-8">
+      <div className="mx-auto max-w-7xl space-y-8">
         {/* Header */}
         <div className="space-y-4">
           <div className="flex items-center justify-between">
@@ -78,7 +79,8 @@ export default function DocumentsPage() {
               </p>
             </div>
             <Link href="/chat">
-              <Button>← Back to Chat</Button>
+              <Button>
+                <ArrowLeftIcon className="w-4 h-4" /> Back to Chat</Button>
             </Link>
           </div>
         </div>
@@ -94,8 +96,8 @@ export default function DocumentsPage() {
         )}
 
         {/* Documents List */}
-        <div>
-          <h2 className="mb-4 text-xl font-semibold text-slate-900">
+        <div className='bg-blue-500/50 rounded-lg p-4 max-h-[500px] overflow-y-auto '>
+          <h2 className="mb-4 text-2xl font-bold text-white">
             Uploaded Documents
           </h2>
 
@@ -110,11 +112,11 @@ export default function DocumentsPage() {
               </p>
             </Card>
           ) : (
-            <div className="space-y-3">
+            <div className=" space-y-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               {documents.map((doc) => (
                 <Card
                   key={doc.id}
-                  className="flex items-center justify-between p-4 hover:bg-slate-50"
+                  className="flex items-center justify-between p-4 bg-gray-200 hover:bg-slate-50"
                 >
                   <div className="flex-1 min-w-0">
                     <p className="font-medium text-slate-900 truncate">

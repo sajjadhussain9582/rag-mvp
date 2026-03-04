@@ -1,15 +1,16 @@
 import { streamText, convertToModelMessages } from 'ai'
 import { createOpenAI } from '@ai-sdk/openai'
-import { generateEmbedding } from '@/lib/embeddings'
 import {
-  searchDocuments,
-  searchDocumentsFallback,
   saveChatMessage,
   createChatSession,
   getMessagesForUser,
-  SearchResult,
 } from '@/lib/rag-db'
 import { createClient } from '@/lib/supabase/server'
+import {
+  SupabaseRAGRetriever,
+  formatDocumentsAsContext,
+  RAG_SYSTEM_PROMPT_TEMPLATE,
+} from '@/lib/langchain-rag'
 
 const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
@@ -70,54 +71,21 @@ export async function POST(request: Request) {
               .join('')
           : ''
 
-          
-    let queryEmbedding: number[] = []
-    try {
-      if (userQuery.trim()) {
-        queryEmbedding = await generateEmbedding(userQuery)
-      }
-    } catch (error) {
-      console.error(' Failed to generate query embedding:', error)
-    }
-    let searchResults: SearchResult[] = []
-    if (queryEmbedding.length > 0) {
-      try {
-        searchResults = await searchDocuments(user.id, queryEmbedding, 5, 0.4)
-      } catch {
-        searchResults = await searchDocumentsFallback(user.id, queryEmbedding, 5)
-      }
-    }
-    let ragContext = ''
-    const sources = []
-
-    if (searchResults.length > 0) {
-      ragContext = 'Based on the provided documents, here is relevant information:\n\n'
-      for (const result of searchResults) {
-        ragContext += `[From ${result.filename}]\n${result.content}\n\n`
-        sources.push({
-          chunkId: result.chunkId,
-          filename: result.filename,
-          content: result.content,
-          similarity: result.similarity,
-        })
-      }
-    } else {
-      ragContext =
-        'No relevant documents found in the knowledge base. Responding based on general knowledge:\n\n'
-    }
-
-    // Build system prompt for RAG
-    const systemPrompt = `You are a helpful AI assistant that answers questions based on provided documents.
-
-${ragContext ? `Document Context:\n${ragContext}` : 'No document context available.'}
-
-IMPORTANT INSTRUCTIONS:
-1. Only provide information that exists in the provided documents
-2. If the user asks about something not covered in the documents, clearly state that it's not in your knowledge base
-3. When referencing information from documents, cite the source
-4. If no relevant documents were found, politely explain that you cannot answer the question based on your current knowledge base
-5. Be honest about the limitations of your knowledge
-`
+    // LangChain: retrieve relevant docs and build RAG context
+    const retriever = new SupabaseRAGRetriever({
+      userId: user.id,
+      k: 5,
+      threshold: 0.4,
+    })
+    const docs = await retriever.invoke(userQuery)
+    const ragContext = formatDocumentsAsContext(docs)
+    const sources = docs.map((d) => ({
+      chunkId: d.metadata?.chunkId as string,
+      filename: (d.metadata?.filename as string) ?? 'Unknown',
+      content: d.pageContent,
+      similarity: (d.metadata?.similarity as number) ?? 0,
+    }))
+    const systemPrompt = await RAG_SYSTEM_PROMPT_TEMPLATE.format({ context: ragContext })
 
     // Convert messages for the model
     const modelMessages = await convertToModelMessages(messages as Parameters<typeof convertToModelMessages>[0])
