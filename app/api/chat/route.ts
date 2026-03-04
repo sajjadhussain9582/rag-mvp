@@ -2,8 +2,11 @@ import { streamText, convertToModelMessages } from 'ai'
 import { createOpenAI } from '@ai-sdk/openai'
 import { generateEmbedding } from '@/lib/embeddings'
 import {
+  searchDocuments,
   searchDocumentsFallback,
   saveChatMessage,
+  createChatSession,
+  getMessagesForUser,
   SearchResult,
 } from '@/lib/rag-db'
 import { createClient } from '@/lib/supabase/server'
@@ -18,15 +21,16 @@ interface ChatRequest {
     content: string
     parts?: any[]
   }>
-  sessionId: string
+  sessionId?: string
 }
 
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as ChatRequest
-    const { messages, sessionId } = body
+    const { messages } = body
+    const rawSessionId = body.sessionId
 
-    // Get current user
+    // Get current user first — we need user for everything
     const supabase = await createClient()
     const {
       data: { user },
@@ -39,6 +43,12 @@ export async function POST(request: Request) {
         headers: { 'content-type': 'application/json' },
       })
     }
+
+    // Use provided sessionId or create a new session for this user
+    const sessionId =
+      rawSessionId && typeof rawSessionId === 'string' && rawSessionId.trim()
+        ? rawSessionId
+        : await createChatSession(user.id, 'New Chat')
 
     // Get the last user message
     const lastMessage = messages[messages.length - 1]
@@ -60,7 +70,7 @@ export async function POST(request: Request) {
               .join('')
           : ''
 
-    // Generate embedding for the user query
+          
     let queryEmbedding: number[] = []
     try {
       if (userQuery.trim()) {
@@ -68,16 +78,15 @@ export async function POST(request: Request) {
       }
     } catch (error) {
       console.error(' Failed to generate query embedding:', error)
-      // Continue without embeddings - will respond without RAG context
     }
-
-    // Search for relevant documents
     let searchResults: SearchResult[] = []
     if (queryEmbedding.length > 0) {
-      searchResults = await searchDocumentsFallback(user.id, queryEmbedding, 5)
+      try {
+        searchResults = await searchDocuments(user.id, queryEmbedding, 5, 0.4)
+      } catch {
+        searchResults = await searchDocumentsFallback(user.id, queryEmbedding, 5)
+      }
     }
-    console.log('searchResults', searchResults,user.id, queryEmbedding)
-    // Build RAG context from search results
     let ragContext = ''
     const sources = []
 
@@ -124,26 +133,66 @@ IMPORTANT INSTRUCTIONS:
     // Save user message
     await saveChatMessage(sessionId, 'user', userQuery, sources.length > 0 ? sources : undefined)
 
-    // Stream the response and save it
-    return result.toUIMessageStreamResponse({
+    // Stream the response and save it; include sessionId in header so client can store it
+    const streamResponse = result.toUIMessageStreamResponse({
       onFinish: async ({ responseMessage }) => {
-        const msg = responseMessage as { content?: string; parts?: Array<{ type: string; text?: string }> }
-        const content =
-          typeof msg.content === 'string'
-            ? msg.content
-            : msg.parts
-                ?.filter((p): p is { type: 'text'; text: string } => p.type === 'text')
-                .map((p) => p.text)
-                .join('') ?? ''
-        const assistantText = content || 'Unable to generate response'
-        await saveChatMessage(sessionId, 'assistant', assistantText, undefined)
+        try {
+          const msg = responseMessage as { content?: string; parts?: Array<{ type: string; text?: string }> }
+          const content =
+            typeof msg.content === 'string'
+              ? msg.content
+              : msg.parts
+                  ?.filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+                  .map((p) => p.text)
+                  .join('') ?? ''
+          const assistantText = content || 'Unable to generate response'
+          await saveChatMessage(sessionId, 'assistant', assistantText, undefined)
+        } catch (err) {
+          console.error(' Failed to save assistant message:', err)
+        }
       },
     })
+    streamResponse.headers.set('X-Session-Id', sessionId)
+    return streamResponse
   } catch (error) {
     console.error(' Chat API error:', error)
     return new Response(
       JSON.stringify({
         error: 'Failed to process chat request',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      }),
+      {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      }
+    )
+  }
+}
+export async function GET(request: Request) {
+  const supabase = await createClient()
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser()
+
+  if (userError || !user) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
+  try {
+    const messages = await getMessagesForUser(user.id)
+    return new Response(JSON.stringify({ messages }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  } catch (error) {
+    console.error('Chat GET error:', error)
+    return new Response(
+      JSON.stringify({
+        error: 'Failed to fetch messages',
         details: error instanceof Error ? error.message : 'Unknown error',
       }),
       {

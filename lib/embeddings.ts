@@ -1,8 +1,8 @@
 import { embed } from 'ai'
 import { createOpenAI } from '@ai-sdk/openai'
 
-const CHUNK_SIZE = 500 // characters per chunk
-const CHUNK_OVERLAP = 50 // overlap between chunks for context
+const CHUNK_SIZE = 500 
+const CHUNK_OVERLAP = 50 
 
 const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
@@ -23,9 +23,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   }
 }
 
-/**
- * Splits text into chunks with overlap for better semantic continuity
- */
+
 export function chunkText(text: string): Array<{ content: string; index: number }> {
   const chunks: Array<{ content: string; index: number }> = []
   let start = 0
@@ -39,7 +37,7 @@ export function chunkText(text: string): Array<{ content: string; index: number 
       chunks.push({ content: chunk, index })
       index++
     }
-    
+    if(end>=text.length) break
     start = end - CHUNK_OVERLAP
     if (start < 0) break
   }
@@ -50,9 +48,6 @@ export function chunkText(text: string): Array<{ content: string; index: number 
 export const CHUNK_SIZE_CHARS = CHUNK_SIZE
 export const CHUNK_OVERLAP_CHARS = CHUNK_OVERLAP
 
-/**
- * Yields chunks one at a time (avoids holding full chunks array in memory).
- */
 export function* chunkTextIterator(
   text: string
 ): Generator<{ content: string; index: number }> {
@@ -65,15 +60,13 @@ export function* chunkTextIterator(
       yield { content: slice, index }
       index++
     }
+    if (end >= text.length) break
     start = end - CHUNK_OVERLAP
     if (start < 0) break
   }
   if (index === 0) yield { content: text, index: 0 }
 }
 
-/**
- * Extracts text from JSON document structure
- */
 export function extractTextFromJSON(data: Record<string, any>): string {
   const texts: string[] = []
 
@@ -91,9 +84,6 @@ export function extractTextFromJSON(data: Record<string, any>): string {
   return texts.join('\n\n')
 }
 
-/**
- * Counts approximate tokens in text (rough estimate)
- */
 export function estimateTokenCount(text: string): number {
   // Rough estimate: 1 token ≈ 4 characters
   return Math.ceil(text.length / 4)

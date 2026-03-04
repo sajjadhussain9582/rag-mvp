@@ -10,6 +10,8 @@ import { ChatInput } from '@/components/chat-input'
 import { DocumentUpload } from '@/components/document-upload'
 import Link from 'next/link'
 
+const SESSION_STORAGE_KEY = 'rag-chat-session-id'
+
 interface UIMessage {
   id: string
   role: 'user' | 'assistant'
@@ -23,38 +25,77 @@ interface UIMessage {
 
 export default function ChatPage() {
   const [sessionId, setSessionId] = useState<string>('')
+  const [initialMessages, setInitialMessages] = useState<Array<{ id: string; role: 'user' | 'assistant'; content: string; sources?: unknown }>>([])
   const [isInitializing, setIsInitializing] = useState(true)
+  const [initError, setInitError] = useState<string | null>(null)
   const [showUpload, setShowUpload] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // Initialize chat session
   useEffect(() => {
     async function initSession() {
+      setInitError(null)
       try {
+        const stored = typeof window !== 'undefined' ? localStorage.getItem(SESSION_STORAGE_KEY) : null
+        
+          const res = await fetch(`/api/chat`)
+          if (res.ok) {
+            const data = await res.json()
+            const all = Array.isArray(data.messages) ? data.messages : []
+            setSessionId(stored ?? '')
+            setInitialMessages(all)
+            setIsInitializing(false)
+            return
+          }
+          console.log(initialMessages,"all messages")
+       
         const response = await fetch('/api/chat/session', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ title: 'Chat' }),
         })
-
         if (!response.ok) {
           console.error('Failed to create session')
+          setInitError('Could not start chat. Please sign in and refresh the page.')
+          setSessionId('')
+          setInitialMessages([])
+          setIsInitializing(false)
           return
         }
-
         const data = await response.json()
-        setSessionId(data.sessionId)
+        const newId = data?.sessionId
+        if (!newId || typeof newId !== 'string') {
+          setInitError('Could not start chat. Please refresh the page.')
+          setSessionId('')
+          setInitialMessages([])
+          setIsInitializing(false)
+          return
+        }
+        if (typeof window !== 'undefined') {
+          localStorage.setItem(SESSION_STORAGE_KEY, newId)
+        }
+        setSessionId(newId)
+        setInitialMessages([])
+        setIsInitializing(false)
       } catch (error) {
         console.error('Session init error:', error)
-      } finally {
+        setInitError('Could not start chat. Please refresh the page.')
+        setSessionId('')
+        setInitialMessages([])
         setIsInitializing(false)
       }
     }
-
     initSession()
   }, [])
 
-  const { messages, sendMessage, status } = useChat({
+  const seedMessages = initialMessages.map((m) => ({
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    parts: [{ type: 'text' as const, text: m.content }],
+    ...(m.sources != null && { sources: m.sources }),
+  }))
+
+  const { messages, sendMessage, status, setMessages } = useChat({
     transport: new DefaultChatTransport({
       api: '/api/chat',
       prepareSendMessagesRequest: ({ messages: msgs }) => ({
@@ -64,7 +105,19 @@ export default function ChatPage() {
         },
       }),
     }),
-  })
+    ...(seedMessages.length > 0 && { messages: seedMessages }),
+  } as Parameters<typeof useChat>[0])
+  useEffect(() => {
+    if (initialMessages.length === 0) return
+    const seed = initialMessages.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      parts: [{ type: 'text' as const, text: m.content }],
+      ...(m.sources != null && { sources: m.sources }),
+    }))
+    setMessages(seed)
+  }, [initialMessages, setMessages])
 
   const isLoading = status === 'submitted' || status === 'streaming'
 
@@ -89,6 +142,23 @@ export default function ChatPage() {
       <div className="flex h-screen items-center justify-center bg-slate-50">
         <Card className="p-8">
           <p className="text-slate-600">Initializing chat...</p>
+        </Card>
+      </div>
+    )
+  }
+
+  if (initError || !sessionId) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-slate-50">
+        <Card className="p-8 max-w-md text-center space-y-4">
+          <p className="text-slate-700">{initError ?? 'Could not start chat. Please refresh the page.'}</p>
+          <Button
+            variant="outline"
+            onClick={() => window.location.reload()}
+            className="w-full"
+          >
+            Refresh page
+          </Button>
         </Card>
       </div>
     )
@@ -150,10 +220,12 @@ export default function ChatPage() {
                 {messages.map((msg) => (
                   <ChatMessage
                     key={msg.id}
-                    role={msg.role as 'user' | 'assistant' | 'system'}
+                    role={msg.role === 'system' ? 'assistant' : msg.role}
                     content={extractTextFromMessage(msg as UIMessage)}
                     sources={
-                      (msg as any).sources as unknown[] | undefined
+                      Array.isArray((msg as unknown as { sources?: unknown }).sources)
+                        ? ((msg as unknown as { sources: unknown }).sources as { filename: string; content: string; similarity: number; chunkId: string }[])
+                        : undefined
                     }
                   />
                 ))}

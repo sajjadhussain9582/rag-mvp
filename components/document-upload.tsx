@@ -40,6 +40,9 @@ export function DocumentUpload({ onUploadSuccess, onError }: DocumentUploadProps
     clearPolling()
     setProcessingStatus('completed')
     setProgress(`✓ ${message}`)
+
+    setIsLoading(false)
+    setProcessingStatus(null)
     setTimeout(() => {
       if (!isMountedRef.current) return
       setProgress('')

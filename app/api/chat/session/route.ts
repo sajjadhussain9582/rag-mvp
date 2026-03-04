@@ -77,13 +77,18 @@ export async function GET(request: Request) {
       })
     }
 
-    // Get chat history
+    // Get chat history (RLS ensures user can only read own session messages)
     const history = await getChatHistory(sessionId)
 
+    const messages = (history || []).map((row: { id: string; role: string; content: string; sources?: unknown }) => ({
+      id: row.id,
+      role: row.role as 'user' | 'assistant',
+      content: row.content,
+      sources: row.sources ?? undefined,
+    }))
+
     return new Response(
-      JSON.stringify({
-        messages: history,
-      }),
+      JSON.stringify({ messages }),
       {
         status: 200,
         headers: { 'content-type': 'application/json' },

@@ -1,5 +1,4 @@
 import { createClient } from '@/lib/supabase/server'
-import type { SupabaseClient } from '@supabase/supabase-js'
 
 export interface DocumentMetadata {
   id: string
@@ -34,9 +33,6 @@ export interface ChatSource {
 
 const EMBEDDING_MODEL_NAME = 'text-embedding-3-small'
 
-/**
- * Create a document row and return its id. Use with appendChunkEmbeddingBatch for batch processing.
- */
 export async function createDocument(
   userId: string,
   filename: string,
@@ -58,10 +54,7 @@ export async function createDocument(
   return { documentId: data.id }
 }
 
-/**
- * Insert a batch of chunks and their embeddings for an existing document.
- * Use after createDocument for memory-efficient batch processing.
- */
+
 export async function appendChunkEmbeddingBatch(
   documentId: string,
   chunks: Array<{ content: string; index: number }>,
@@ -92,10 +85,6 @@ export async function appendChunkEmbeddingBatch(
   if (embError) throw embError
 }
 
-/**
- * Store a document and its chunks with embeddings in the database (all at once).
- * For large documents, prefer createDocument + appendChunkEmbeddingBatch in batches.
- */
 export async function storeDocument(
   userId: string,
   filename: string,
@@ -109,41 +98,49 @@ export async function storeDocument(
   return { success: true, documentId }
 }
 
-/**
- * Search for relevant document chunks using vector similarity
- */
 export async function searchDocuments(
   userId: string,
   queryEmbedding: number[],
   limit: number = 5,
-  threshold: number = 0.7
+  threshold: number = 0.4
 ): Promise<SearchResult[]> {
   const supabase = await createClient()
-
-  try {
-    const { data, error } = await supabase.rpc('search_embeddings', {
-      query_embedding: queryEmbedding,
-      user_id: userId,
-      match_count: limit,
-      match_threshold: threshold,
-    })
-
-    if (error) {
-      console.error(' Search error:', error)
-      return []
-    }
-
-    return data || []
-  } catch (error) {
-    console.error(' Error searching documents:', error)
-    return []
+  const { data, error } = await supabase.rpc('search_embeddings', {
+    query_embedding: queryEmbedding,
+    user_id: userId,
+    match_count: limit,
+    match_threshold: threshold,
+  })
+  if (error) {
+    console.error(' Search error:', error)
+    throw error
   }
+  const rows = (data ?? []) as Array<{ chunk_id: string; document_id: string; filename: string; content: string; similarity: number }>
+  return rows.map((row) => ({
+    chunkId: row.chunk_id,
+    documentId: row.document_id,
+    filename: row.filename,
+    content: row.content,
+    similarity: row.similarity,
+  }))
 }
 
-/**
- * Fallback search function if RPC is not available
- * Uses similarity operator directly
- */
+/** Parse embedding from DB (pgvector can return string or number[]) */
+function parseEmbedding(embedding: unknown): number[] {
+  if (Array.isArray(embedding)) return embedding
+  if (typeof embedding === 'string') {
+    try {
+      const parsed = JSON.parse(embedding) as number[]
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+
+const FALLBACK_FETCH_SIZE = 100
+
 export async function searchDocumentsFallback(
   userId: string,
   queryEmbedding: number[],
@@ -152,7 +149,7 @@ export async function searchDocumentsFallback(
   const supabase = await createClient()
 
   try {
-    // Query embeddings with similarity calculation
+    // Fetch a larger pool so we can rank by similarity (no vector ORDER BY in this path)
     const { data, error } = await supabase
       .from('embeddings')
       .select(
@@ -173,17 +170,18 @@ export async function searchDocumentsFallback(
       `
       )
       .eq('document_chunks.documents.user_id', userId)
-      .limit(limit)
+      .limit(FALLBACK_FETCH_SIZE)
 
     if (error) {
       console.error(' Fallback search error:', error)
       return []
     }
 
-    // Calculate similarities and filter
-    const results = data
+    // Parse embeddings (pgvector often returns string), compute similarity, sort, then filter
+    const results = (data || [])
       .map((row: any) => {
-        const similarity = cosineSimilarity(queryEmbedding, row.embedding)
+        const embedding = parseEmbedding(row.embedding)
+        const similarity = cosineSimilarity(queryEmbedding, embedding)
         return {
           chunkId: row.chunk_id,
           documentId: row.document_chunks.documents.id,
@@ -203,9 +201,6 @@ export async function searchDocumentsFallback(
   }
 }
 
-/**
- * Calculate cosine similarity between two vectors
- */
 function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length) return 0
 
@@ -272,6 +267,25 @@ export async function saveChatMessage(
 }
 
 /**
+ * Get chat sessions for a user (for listing / switching conversations)
+ */
+export async function getChatSessions(userId: string) {
+  const supabase = await createClient()
+  try {
+    const { data, error } = await supabase
+      .from('chat_sessions')
+      .select('id, title, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+    if (error) throw error
+    return data ?? []
+  } catch (error) {
+    console.error(' Error fetching chat sessions:', error)
+    return []
+  }
+}
+
+/**
  * Get chat history for a session
  */
 export async function getChatHistory(sessionId: string) {
@@ -288,6 +302,30 @@ export async function getChatHistory(sessionId: string) {
     return data
   } catch (error) {
     console.error(' Error fetching chat history:', error)
+    return []
+  }
+}
+
+
+export async function getMessagesForUser(userId: string) {
+  const supabase = await createClient()
+  try {
+    const { data: sessions, error: sessionsError } = await supabase
+      .from('chat_sessions')
+      .select('id')
+      .eq('user_id', userId)
+    if (sessionsError) throw sessionsError
+    const sessionIds = (sessions ?? []).map((s) => s.id)
+    if (sessionIds.length === 0) return []
+    const { data, error } = await supabase
+      .from('chat_messages')
+      .select('*')
+      .in('session_id', sessionIds)
+      .order('created_at', { ascending: true })
+    if (error) throw error
+    return data ?? []
+  } catch (error) {
+    console.error(' Error fetching messages for user:', error)
     return []
   }
 }
@@ -333,75 +371,3 @@ export async function deleteDocument(documentId: string, userId: string) {
   }
 }
 
-export interface DocumentProcessingJob {
-  id: string
-  document_id: string
-  user_id: string
-  storage_path: string
-  status: 'pending' | 'processing' | 'completed' | 'failed'
-  message: string | null
-  error_details: string | null
-  created_at: string
-  updated_at: string
-}
-
-export type DocumentProcessingJobStatus = DocumentProcessingJob['status']
-
-export async function createProcessingJob(
-  documentId: string,
-  userId: string,
-  storagePath: string,
-  supabaseClient?: SupabaseClient,
-): Promise<DocumentProcessingJob> {
-  const supabase = supabaseClient ?? (await createClient())
-  const { data, error } = await supabase
-    .from('document_processing_jobs')
-    .insert({
-      document_id: documentId,
-      user_id: userId,
-      storage_path: storagePath,
-      status: 'pending',
-      message: 'Queued for processing',
-    })
-    .select('*')
-    .single()
-
-  if (error) throw error
-  return data
-}
-
-export async function updateProcessingJob(
-  jobId: string,
-  updates: Partial<Pick<DocumentProcessingJob, 'status' | 'message' | 'error_details'>>,
-  supabaseClient?: SupabaseClient,
-): Promise<DocumentProcessingJob | null> {
-  const supabase = supabaseClient ?? (await createClient())
-  const { data, error } = await supabase
-    .from('document_processing_jobs')
-    .update(updates)
-    .eq('id', jobId)
-    .select('*')
-    .maybeSingle()
-
-  if (error) throw error
-  return data
-}
-
-export async function getProcessingJob(
-  jobId: string,
-  supabaseClient?: SupabaseClient,
-): Promise<DocumentProcessingJob | null> {
-  const supabase = supabaseClient ?? (await createClient())
-  const { data, error } = await supabase
-    .from('document_processing_jobs')
-    .select('*')
-    .eq('id', jobId)
-    .single()
-
-  if (error) {
-    if (error.code === 'PGRST116') return null
-    throw error
-  }
-
-  return data
-}

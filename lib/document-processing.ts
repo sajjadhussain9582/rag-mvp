@@ -11,27 +11,14 @@ import {
   extractTextFromJSON,
   generateEmbedding,
 } from '@/lib/embeddings'
-import { updateProcessingJob } from '@/lib/rag-db'
-import { getServiceSupabase, hasServiceSupabase } from '@/lib/supabase/service'
+import { appendChunkEmbeddingBatch } from '@/lib/rag-db'
 
-const STORAGE_BUCKET = 'MyBucket'
 const EMBED_BATCH_SIZE = 25
-const EMBEDDING_MODEL_NAME = 'text-embedding-3-small'
-
-export interface BackgroundProcessingArgs {
-  jobId: string
-  documentId: string
-  userId: string
-  storagePath: string
-  filename: string
-  contentType: string
-  fileSize: number
-}
 
 /**
- * Stream the Blob to a temp file to avoid holding arrayBuffer + Buffer + string in memory.
+ * Stream a Blob (e.g. File from multipart) to a temp file to avoid loading the whole file in memory.
  */
-async function streamBlobToTempFile(blob: Blob): Promise<string> {
+export async function streamBlobToTempFile(blob: Blob): Promise<string> {
   const tempPath = path.join(
     os.tmpdir(),
     `rag-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -44,7 +31,7 @@ async function streamBlobToTempFile(blob: Blob): Promise<string> {
 /**
  * Async generator: read file as UTF-8 stream and yield chunks with overlap (no full-file string in memory).
  */
-async function* streamChunksFromFile(
+export async function* streamChunksFromFile(
   filePath: string
 ): AsyncGenerator<{ content: string; index: number }> {
   const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
@@ -68,235 +55,82 @@ async function* streamChunksFromFile(
   }
 }
 
-export async function processDocumentInBackground({
-  jobId,
-  documentId,
-  storagePath,
-  contentType,
-}: BackgroundProcessingArgs) {
-  if (!hasServiceSupabase()) {
-    console.warn('Skipping background processing: missing SUPABASE_SERVICE_ROLE_KEY')
-    await safeUpdateJob(jobId, {
-      status: 'failed',
-      message: 'Missing service role key',
-      error_details: 'Set SUPABASE_SERVICE_ROLE_KEY to continue background jobs.',
-    })
-    return
-  }
+/**
+ * Process a temp file: parse (JSON or plain text), chunk with FS streaming where possible,
+ * embed batches, and insert into document_chunks + embeddings via appendChunkEmbeddingBatch.
+ * Uses request-scoped createClient() inside rag-db so RLS is correct.
+ */
+export async function processDocumentFromTempFile(
+  tempPath: string,
+  documentId: string,
+  contentType: string
+): Promise<{ chunkCount: number }> {
+  const isJson =
+    contentType === 'application/json' || contentType === 'text/json'
 
-  const supabase = getServiceSupabase()
-  let tempPath: string | null = null
+  let chunkCount = 0
 
-  try {
-    await safeUpdateJob(jobId, {
-      status: 'processing',
-      message: 'Downloading document for processing',
-    })
-
-    const { data: downloadData, error: downloadError } = await supabase.storage
-      .from(STORAGE_BUCKET)
-      .download(storagePath)
-
-    if (downloadError || !downloadData) {
-      throw downloadError ?? new Error('Failed to download file from storage')
+  if (isJson) {
+    const rawText = await fs.promises.readFile(tempPath, 'utf-8')
+    let extractedText: string
+    try {
+      const parsed = JSON.parse(rawText)
+      extractedText = extractTextFromJSON(parsed)
+    } catch {
+      throw new Error('Uploaded JSON document is malformed')
+    }
+    if (!extractedText.trim()) {
+      throw new Error('Document contains no readable text')
     }
 
-    tempPath = await streamBlobToTempFile(downloadData)
+    let batch: Array<{ content: string; index: number }> = []
 
-    const isJson =
-      contentType === 'application/json' || contentType === 'text/json'
+    for (const chunk of chunkTextIterator(extractedText)) {
+      batch.push(chunk)
+      if (batch.length < EMBED_BATCH_SIZE) continue
 
-    if (isJson) {
-      const rawText = await fs.promises.readFile(tempPath, 'utf-8')
-      let extractedText: string
-      try {
-        const parsed = JSON.parse(rawText)
-        extractedText = extractTextFromJSON(parsed)
-      } catch {
-        throw new Error('Uploaded JSON document is malformed')
+      const batchEmbeddings: number[][] = []
+      for (const b of batch) {
+        batchEmbeddings.push(await generateEmbedding(b.content))
       }
-      if (!extractedText.trim()) {
-        throw new Error('Document contains no readable text')
-      }
-
-      let processedChunks = 0
-      let batch: Array<{ content: string; index: number }> = []
-
-      for (const chunk of chunkTextIterator(extractedText)) {
-        batch.push(chunk)
-        if (batch.length < EMBED_BATCH_SIZE) continue
-
-        const batchEmbeddings: number[][] = []
-        for (const b of batch) {
-          batchEmbeddings.push(await generateEmbedding(b.content))
-        }
-        const chunkInserts = batch.map((c) => ({
-          document_id: documentId,
-          chunk_number: c.index,
-          content: c.content,
-          token_count: Math.ceil(c.content.length / 4),
-        }))
-        const { data: chunkRows, error: chunkInsertError } = await supabase
-          .from('document_chunks')
-          .insert(chunkInserts)
-          .select('id')
-        if (chunkInsertError || !chunkRows) {
-          throw chunkInsertError ?? new Error('Failed to insert document chunks')
-        }
-        const embeddingInserts = chunkRows.map((row, i) => ({
-          chunk_id: row.id,
-          embedding: batchEmbeddings[i],
-          model_name: EMBEDDING_MODEL_NAME,
-        }))
-        const { error: embeddingInsertError } = await supabase
-          .from('embeddings')
-          .insert(embeddingInserts)
-        if (embeddingInsertError) throw embeddingInsertError
-
-        processedChunks += batch.length
-        await safeUpdateJob(jobId, {
-          message: `Processed ${processedChunks} chunks`,
-        })
-        batch = []
-      }
-
-      if (batch.length > 0) {
-        const batchEmbeddings: number[][] = []
-        for (const b of batch) {
-          batchEmbeddings.push(await generateEmbedding(b.content))
-        }
-        const chunkInserts = batch.map((c) => ({
-          document_id: documentId,
-          chunk_number: c.index,
-          content: c.content,
-          token_count: Math.ceil(c.content.length / 4),
-        }))
-        const { data: chunkRows, error: chunkInsertError } = await supabase
-          .from('document_chunks')
-          .insert(chunkInserts)
-          .select('id')
-        if (chunkInsertError || !chunkRows) {
-          throw chunkInsertError ?? new Error('Failed to insert document chunks')
-        }
-        const embeddingInserts = chunkRows.map((row, i) => ({
-          chunk_id: row.id,
-          embedding: batchEmbeddings[i],
-          model_name: EMBEDDING_MODEL_NAME,
-        }))
-        const { error: embeddingInsertError } = await supabase
-          .from('embeddings')
-          .insert(embeddingInserts)
-        if (embeddingInsertError) throw embeddingInsertError
-        processedChunks += batch.length
-      }
-
-      await safeUpdateJob(jobId, {
-        status: 'completed',
-        message: `Finished processing ${processedChunks} chunks`,
-      })
-    } else {
-      let processedChunks = 0
-      let batch: Array<{ content: string; index: number }> = []
-
-      for await (const chunk of streamChunksFromFile(tempPath)) {
-        batch.push(chunk)
-        if (batch.length < EMBED_BATCH_SIZE) continue
-
-        const batchEmbeddings: number[][] = []
-        for (const b of batch) {
-          batchEmbeddings.push(await generateEmbedding(b.content))
-        }
-        const chunkInserts = batch.map((c) => ({
-          document_id: documentId,
-          chunk_number: c.index,
-          content: c.content,
-          token_count: Math.ceil(c.content.length / 4),
-        }))
-        const { data: chunkRows, error: chunkInsertError } = await supabase
-          .from('document_chunks')
-          .insert(chunkInserts)
-          .select('id')
-        if (chunkInsertError || !chunkRows) {
-          throw chunkInsertError ?? new Error('Failed to insert document chunks')
-        }
-        const embeddingInserts = chunkRows.map((row, i) => ({
-          chunk_id: row.id,
-          embedding: batchEmbeddings[i],
-          model_name: EMBEDDING_MODEL_NAME,
-        }))
-        const { error: embeddingInsertError } = await supabase
-          .from('embeddings')
-          .insert(embeddingInserts)
-        if (embeddingInsertError) throw embeddingInsertError
-        processedChunks += batch.length
-        await safeUpdateJob(jobId, {
-          message: `Processed ${processedChunks} chunks`,
-        })
-        batch = []
-      }
-
-      if (batch.length > 0) {
-        const batchEmbeddings: number[][] = []
-        for (const b of batch) {
-          batchEmbeddings.push(await generateEmbedding(b.content))
-        }
-        const chunkInserts = batch.map((c) => ({
-          document_id: documentId,
-          chunk_number: c.index,
-          content: c.content,
-          token_count: Math.ceil(c.content.length / 4),
-        }))
-        const { data: chunkRows, error: chunkInsertError } = await supabase
-          .from('document_chunks')
-          .insert(chunkInserts)
-          .select('id')
-        if (chunkInsertError || !chunkRows) {
-          throw chunkInsertError ?? new Error('Failed to insert document chunks')
-        }
-        const embeddingInserts = chunkRows.map((row, i) => ({
-          chunk_id: row.id,
-          embedding: batchEmbeddings[i],
-          model_name: EMBEDDING_MODEL_NAME,
-        }))
-        const { error: embeddingInsertError } = await supabase
-          .from('embeddings')
-          .insert(embeddingInserts)
-        if (embeddingInsertError) throw embeddingInsertError
-        processedChunks += batch.length
-      }
-
-      await safeUpdateJob(jobId, {
-        status: 'completed',
-        message: `Finished processing ${processedChunks} chunks`,
-      })
+      await appendChunkEmbeddingBatch(documentId, batch, batchEmbeddings)
+      chunkCount += batch.length
+      batch = []
     }
-  } catch (error) {
-    console.error('Background processing error:', error)
-    await safeUpdateJob(jobId, {
-      status: 'failed',
-      message: 'Processing failed. Please try again.',
-      error_details: error instanceof Error ? error.message : 'Unknown error',
-    })
-  } finally {
-    if (tempPath) {
-      fs.unlink(tempPath, () => {})
+
+    if (batch.length > 0) {
+      const batchEmbeddings: number[][] = []
+      for (const b of batch) {
+        batchEmbeddings.push(await generateEmbedding(b.content))
+      }
+      await appendChunkEmbeddingBatch(documentId, batch, batchEmbeddings)
+      chunkCount += batch.length
+    }
+  } else {
+    let batch: Array<{ content: string; index: number }> = []
+
+    for await (const chunk of streamChunksFromFile(tempPath)) {
+      batch.push(chunk)
+      if (batch.length < EMBED_BATCH_SIZE) continue
+
+      const batchEmbeddings: number[][] = []
+      for (const b of batch) {
+        batchEmbeddings.push(await generateEmbedding(b.content))
+      }
+      await appendChunkEmbeddingBatch(documentId, batch, batchEmbeddings)
+      chunkCount += batch.length
+      batch = []
+    }
+
+    if (batch.length > 0) {
+      const batchEmbeddings: number[][] = []
+      for (const b of batch) {
+        batchEmbeddings.push(await generateEmbedding(b.content))
+      }
+      await appendChunkEmbeddingBatch(documentId, batch, batchEmbeddings)
+      chunkCount += batch.length
     }
   }
-}
 
-async function safeUpdateJob(
-  jobId: string,
-  updates: Parameters<typeof updateProcessingJob>[1],
-) {
-  if (!hasServiceSupabase()) {
-    console.warn('Cannot update processing job: missing service role key')
-    return
-  }
-
-  try {
-    const supabase = getServiceSupabase()
-    await updateProcessingJob(jobId, updates, supabase)
-  } catch (error) {
-    console.error('Failed to update processing job status', error)
-  }
+  return { chunkCount }
 }
