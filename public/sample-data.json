@@ -1,0 +1,50 @@
+{
+  "title": "Company Knowledge Base - Product Documentation",
+  "sections": [
+    {
+      "id": "product-overview",
+      "title": "Product Overview",
+      "content": "Our product is an AI-powered RAG (Retrieval-Augmented Generation) chatbot that helps organizations leverage their existing documents and data. It uses semantic search to find relevant information and provides answers with source citations. The system is built with Next.js, Supabase, and OpenAI's GPT-4o Mini model."
+    },
+    {
+      "id": "features",
+      "title": "Key Features",
+      "content": "1. Document Upload: Support for JSON and text files up to 50MB. 2. Semantic Search: Uses vector embeddings to find contextually relevant information. 3. Chat Interface: Conversational interface for asking questions about documents. 4. Source Citations: Automatically shows which documents provided the answer. 5. Chat History: Maintains conversation history for reference. 6. Real-time Processing: Processes documents and generates responses in real-time."
+    },
+    {
+      "id": "pricing",
+      "title": "Pricing Plans",
+      "content": "Starter Plan: $29/month - Up to 10 documents, 1000 chat messages, basic support. Professional Plan: $99/month - Up to 100 documents, 10000 chat messages, priority support. Enterprise Plan: Custom pricing - Unlimited documents, unlimited messages, dedicated support, custom integrations."
+    },
+    {
+      "id": "setup",
+      "title": "Setup Instructions",
+      "content": "1. Sign up for an account. 2. Configure your OpenAI API key in settings. 3. Connect your Supabase database. 4. Upload your first document via the Documents page. 5. Ask questions in the Chat page. 6. View document management in the Documents page."
+    },
+    {
+      "id": "faq",
+      "title": "Frequently Asked Questions",
+      "content": "Q: What file formats are supported? A: We support JSON and text files. Q: How long does it take to process a document? A: Usually under 30 seconds depending on file size. Q: Can I delete documents? A: Yes, you can delete any document from the Documents page. Q: Is my data encrypted? A: Yes, all data is encrypted in transit and at rest using Supabase. Q: Can multiple users access the same documents? A: Documents are private to each user's account by default."
+    },
+    {
+      "id": "api-reference",
+      "title": "API Reference",
+      "content": "POST /api/chat - Send a message and get an AI response. Parameters: messages (array), sessionId (string). Returns streaming text response. POST /api/documents/upload - Upload a document. Parameters: file (FormData). Returns document ID and processing status. GET /api/documents/list - Get list of user's documents. Returns array of document objects with metadata. POST /api/documents/delete - Delete a document. Parameters: documentId (string). Returns success status."
+    },
+    {
+      "id": "security",
+      "title": "Security & Privacy",
+      "content": "All user data is stored securely in Supabase with Row Level Security (RLS) policies. Each user can only access their own documents and chat history. API keys are stored encrypted and never exposed to the client. All communication uses HTTPS. We comply with GDPR and CCPA data protection regulations. Regular security audits are performed by third-party security firms."
+    },
+    {
+      "id": "troubleshooting",
+      "title": "Troubleshooting",
+      "content": "Issue: Document upload fails. Solution: Check file size (max 50MB) and format (JSON or TXT). Issue: Chat responses are slow. Solution: This may be due to large documents. Try uploading smaller documents. Issue: No relevant sources shown. Solution: Ensure you have uploaded documents related to your question. Issue: API errors. Solution: Check your OpenAI API key is valid in settings. Contact support if problems persist."
+    }
+  ],
+  "metadata": {
+    "version": "1.0",
+    "lastUpdated": "2026-03-03",
+    "author": "Knowledge Base Team"
+  }
+}
