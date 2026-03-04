@@ -17,7 +17,7 @@ export default function HomePage() {
 
     return () => clearTimeout(timer)
   }, [router])
-
+//
   return (
     <div className="flex h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-slate-100">
       <Card className="max-w-md space-y-6 p-8">
