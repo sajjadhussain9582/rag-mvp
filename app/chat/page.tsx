@@ -169,7 +169,7 @@ export default function ChatPage() {
       {/* Sidebar */}
       <aside className="w-80 space-y-4">
         <div className="space-y-2">
-          <h2 className="font-bold text-slate-900">Chatty</h2>
+          {/* <h2 className="font-bold text-slate-900">Chatty</h2> */}
           <p className="text-xs text-slate-600">
             Chat with your documents using AI
           </p>

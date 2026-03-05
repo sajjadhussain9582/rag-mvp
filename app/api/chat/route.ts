@@ -1,28 +1,37 @@
-import { streamText, convertToModelMessages } from 'ai'
-import { createOpenAI } from '@ai-sdk/openai'
+import { createUIMessageStreamResponse } from 'ai'
+import { toBaseMessages, toUIMessageStream } from '@ai-sdk/langchain'
 import {
   saveChatMessage,
   createChatSession,
   getMessagesForUser,
 } from '@/lib/rag-db'
 import { createClient } from '@/lib/supabase/server'
-import {
-  SupabaseRAGRetriever,
-  formatDocumentsAsContext,
-  RAG_SYSTEM_PROMPT_TEMPLATE,
-} from '@/lib/langchain-rag'
-
-const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
+import { SupabaseRAGRetriever, documentsToSources } from '@/lib/langchain-rag'
+import { streamAgent, type AgentGraphState } from '@/lib/agent-graph'
+import { isAIMessage } from '@langchain/core/messages'
 
 export const maxDuration = 60
 
 interface ChatRequest {
   messages: Array<{
+    id?: string
     role: 'user' | 'assistant'
     content: string
-    parts?: any[]
+    parts?: unknown[]
   }>
   sessionId?: string
+}
+
+/** Extract plain text from LangChain message content (string or content blocks). */
+function getMessageContentAsText(message: { content?: unknown }): string {
+  const c = message.content
+  if (typeof c === 'string') return c
+  if (Array.isArray(c)) {
+    return (c as Array<{ type?: string; text?: string }>)
+      .map((block) => (block.type === 'text' && block.text ? block.text : ''))
+      .join('')
+  }
+  return ''
 }
 
 export async function POST(request: Request) {
@@ -31,7 +40,6 @@ export async function POST(request: Request) {
     const { messages } = body
     const rawSessionId = body.sessionId
 
-    // Get current user first — we need user for everything
     const supabase = await createClient()
     const {
       data: { user },
@@ -45,13 +53,11 @@ export async function POST(request: Request) {
       })
     }
 
-    // Use provided sessionId or create a new session for this user
     const sessionId =
       rawSessionId && typeof rawSessionId === 'string' && rawSessionId.trim()
         ? rawSessionId
         : await createChatSession(user.id, 'New Chat')
 
-    // Get the last user message
     const lastMessage = messages[messages.length - 1]
     if (!lastMessage || lastMessage.role !== 'user') {
       return new Response(JSON.stringify({ error: 'Invalid message format' }), {
@@ -60,7 +66,6 @@ export async function POST(request: Request) {
       })
     }
 
-    // Normalize user message to string (client may send content or parts)
     const userQuery =
       typeof lastMessage.content === 'string'
         ? lastMessage.content
@@ -71,57 +76,41 @@ export async function POST(request: Request) {
               .join('')
           : ''
 
-    // LangChain: retrieve relevant docs and build RAG context
+    // Initial RAG retrieval for user-message sources (preserve current behavior)
     const retriever = new SupabaseRAGRetriever({
       userId: user.id,
       k: 5,
       threshold: 0.4,
     })
     const docs = await retriever.invoke(userQuery)
-    const ragContext = formatDocumentsAsContext(docs)
-    const sources = docs.map((d) => ({
-      chunkId: d.metadata?.chunkId as string,
-      filename: (d.metadata?.filename as string) ?? 'Unknown',
-      content: d.pageContent,
-      similarity: (d.metadata?.similarity as number) ?? 0,
-    }))
-    const systemPrompt = await RAG_SYSTEM_PROMPT_TEMPLATE.format({ context: ragContext })
+    const sources = documentsToSources(docs)
 
-    // Convert messages for the model
-    const modelMessages = await convertToModelMessages(messages as Parameters<typeof convertToModelMessages>[0])
-
-    // Call the streaming text function (OpenAI provider uses OPENAI_API_KEY)
-    const result = streamText({
-      model: openai.chat('gpt-4o-mini'),
-      system: systemPrompt,
-      messages: modelMessages,
-      maxOutputTokens: 1024,
-    })
-
-    // Save user message
     await saveChatMessage(sessionId, 'user', userQuery, sources.length > 0 ? sources : undefined)
 
-    // Stream the response and save it; include sessionId in header so client can store it
-    const streamResponse = result.toUIMessageStreamResponse({
-      onFinish: async ({ responseMessage }) => {
+    const langchainMessages = await toBaseMessages(messages as Parameters<typeof toBaseMessages>[0])
+    const graphStream = await streamAgent(user.id, langchainMessages)
+
+    const stream = toUIMessageStream<AgentGraphState>(graphStream, {
+      onFinish: async (finalState) => {
         try {
-          const msg = responseMessage as { content?: string; parts?: Array<{ type: string; text?: string }> }
-          const content =
-            typeof msg.content === 'string'
-              ? msg.content
-              : msg.parts
-                  ?.filter((p): p is { type: 'text'; text: string } => p.type === 'text')
-                  .map((p) => p.text)
-                  .join('') ?? ''
-          const assistantText = content || 'Unable to generate response'
-          await saveChatMessage(sessionId, 'assistant', assistantText, undefined)
+          const msgs = finalState?.messages
+          if (!Array.isArray(msgs) || msgs.length === 0) return
+          const lastAi = [...msgs].reverse().find((m) => isAIMessage(m))
+          if (lastAi) {
+            const assistantText = getMessageContentAsText(lastAi) || 'Unable to generate response'
+            await saveChatMessage(sessionId, 'assistant', assistantText, undefined)
+          }
         } catch (err) {
-          console.error(' Failed to save assistant message:', err)
+          console.error('Failed to save assistant message:', err)
         }
       },
     })
-    streamResponse.headers.set('X-Session-Id', sessionId)
-    return streamResponse
+
+    const response = createUIMessageStreamResponse({
+      stream,
+      headers: { 'X-Session-Id': sessionId },
+    })
+    return response
   } catch (error) {
     console.error(' Chat API error:', error)
     return new Response(

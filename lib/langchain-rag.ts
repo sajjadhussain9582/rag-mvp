@@ -7,6 +7,7 @@ import {
   searchDocuments,
   searchDocumentsFallback,
   type SearchResult,
+  type ChatSource,
 } from '@/lib/rag-db'
 
 const DEFAULT_K = 5
@@ -65,6 +66,16 @@ export class SupabaseRAGRetriever extends BaseRetriever {
       },
     })) as Document[]
   }
+}
+
+/** Map LangChain documents to ChatSource[] for citations (RAG tool and route). */
+export function documentsToSources(docs: Document[]): ChatSource[] {
+  return docs.map((d) => ({
+    chunkId: (d.metadata?.chunkId as string) ?? '',
+    filename: (d.metadata?.filename as string) ?? 'Unknown',
+    content: d.pageContent,
+    similarity: (d.metadata?.similarity as number) ?? 0,
+  }))
 }
 
 /** Build RAG context string from LangChain documents (for system prompt) */

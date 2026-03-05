@@ -22,7 +22,7 @@ export default function HomePage() {
     <div className="flex h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-slate-100">
       <Card className="max-w-md space-y-6 p-8">
         <div className="text-center">
-          <h1 className="text-3xl font-bold text-slate-900">Chatty</h1>
+          {/* <h1 className="text-3xl font-bold text-slate-900">Chatty</h1> */}
           <p className="mt-2 text-slate-600">
             Chat with your documents using AI
           </p>
