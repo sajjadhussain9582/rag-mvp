@@ -5,7 +5,7 @@ import fs from 'fs'
 
 export const maxDuration = 60
 
-const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 // 2 MB — avoid heap OOM and long request duration
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024 // 20 MB
 
 export async function POST(request: Request) {
   let tempPath: string | null = null
@@ -34,11 +34,12 @@ export async function POST(request: Request) {
       )
     }
 
-    const allowedTypes = ['application/json', 'text/plain', 'text/json']
-    if (!allowedTypes.includes(file.type)) {
+    const allowedTypes = ['application/json', 'text/plain', 'text/json', 'application/pdf']
+    const isPdfByExtension = file.name.toLowerCase().endsWith('.pdf')
+    if (!allowedTypes.includes(file.type) && !isPdfByExtension) {
       return new Response(
         JSON.stringify({
-          error: 'Invalid file type. Only JSON and text files are supported.',
+          error: 'Invalid file type. Only JSON, text, and PDF files are supported.',
         }),
         {
           status: 400,
@@ -46,6 +47,11 @@ export async function POST(request: Request) {
         }
       )
     }
+
+    const contentType =
+      isPdfByExtension && file.type !== 'application/pdf'
+        ? 'application/pdf'
+        : file.type
 
     const supabase = await createClient()
     const {
@@ -68,14 +74,14 @@ export async function POST(request: Request) {
     const { documentId } = await createDocument(
       user.id,
       file.name,
-      file.type,
+      contentType,
       file.size
     )
 
     const { chunkCount } = await processDocumentFromTempFile(
       tempPath,
       documentId,
-      file.type
+      contentType
     )
 
     return new Response(

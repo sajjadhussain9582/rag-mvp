@@ -3,6 +3,7 @@ import path from 'path'
 import os from 'os'
 import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
+import { PDFParse } from 'pdf-parse'
 
 import {
   CHUNK_OVERLAP_CHARS,
@@ -56,7 +57,40 @@ export async function* streamChunksFromFile(
 }
 
 /**
- * Process a temp file: parse (JSON or plain text), chunk with FS streaming where possible,
+ * Set pdf-parse worker to the real worker file in node_modules so it works when run from Next.js server bundle.
+ */
+function setPdfWorkerPath(): void {
+  const workerPath = path.join(
+    process.cwd(),
+    'node_modules',
+    'pdf-parse',
+    'dist',
+    'pdf-parse',
+    'cjs',
+    'pdf.worker.mjs'
+  )
+  if (fs.existsSync(workerPath)) {
+    PDFParse.setWorker(workerPath)
+  }
+}
+
+/**
+ * Extract plain text from a PDF file (temp path). Uses pdf-parse and returns full document text.
+ */
+async function extractTextFromPdf(tempPath: string): Promise<string> {
+  setPdfWorkerPath()
+  const data = await fs.promises.readFile(tempPath)
+  const parser = new PDFParse({ data })
+  try {
+    const textResult = await parser.getText()
+    return textResult.text ?? ''
+  } finally {
+    await parser.destroy()
+  }
+}
+
+/**
+ * Process a temp file: parse (JSON, PDF, or plain text), chunk with FS streaming where possible,
  * embed batches, and insert into document_chunks + embeddings via appendChunkEmbeddingBatch.
  * Uses request-scoped createClient() inside rag-db so RLS is correct.
  */
@@ -67,6 +101,8 @@ export async function processDocumentFromTempFile(
 ): Promise<{ chunkCount: number }> {
   const isJson =
     contentType === 'application/json' || contentType === 'text/json'
+  const isPdf =
+    contentType === 'application/pdf' || tempPath.toLowerCase().endsWith('.pdf')
 
   let chunkCount = 0
 
@@ -81,6 +117,42 @@ export async function processDocumentFromTempFile(
     }
     if (!extractedText.trim()) {
       throw new Error('Document contains no readable text')
+    }
+
+    let batch: Array<{ content: string; index: number }> = []
+
+    for (const chunk of chunkTextIterator(extractedText)) {
+      batch.push(chunk)
+      if (batch.length < EMBED_BATCH_SIZE) continue
+
+      const batchEmbeddings: number[][] = []
+      for (const b of batch) {
+        batchEmbeddings.push(await generateEmbedding(b.content))
+      }
+      await appendChunkEmbeddingBatch(documentId, batch, batchEmbeddings)
+      chunkCount += batch.length
+      batch = []
+    }
+
+    if (batch.length > 0) {
+      const batchEmbeddings: number[][] = []
+      for (const b of batch) {
+        batchEmbeddings.push(await generateEmbedding(b.content))
+      }
+      await appendChunkEmbeddingBatch(documentId, batch, batchEmbeddings)
+      chunkCount += batch.length
+    }
+  } else if (isPdf) {
+    let extractedText: string
+    try {
+      extractedText = await extractTextFromPdf(tempPath)
+    } catch (err) {
+      throw new Error(
+        `Failed to parse PDF: ${err instanceof Error ? err.message : 'Unknown error'}`
+      )
+    }
+    if (!extractedText.trim()) {
+      throw new Error('PDF contains no readable text')
     }
 
     let batch: Array<{ content: string; index: number }> = []

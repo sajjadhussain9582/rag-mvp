@@ -63,9 +63,10 @@ export function validateUploadFile(
   maxSizeBytes: number = 52428800 // 50MB
 ): string | null {
   // Check file type
-  const allowedTypes = ['application/json', 'text/plain', 'text/json']
-  if (!allowedTypes.includes(file.type)) {
-    return `Invalid file type. Supported types: JSON, TXT. Received: ${file.type}`
+  const allowedTypes = ['application/json', 'text/plain', 'text/json', 'application/pdf']
+  const isPdfByExtension = file.name.toLowerCase().endsWith('.pdf')
+  if (!allowedTypes.includes(file.type) && !isPdfByExtension) {
+    return `Invalid file type. Supported types: JSON, TXT, PDF. Received: ${file.type}`
   }
 
   // Check file size
@@ -75,7 +76,7 @@ export function validateUploadFile(
   }
 
   // Check file extension
-  const validExtensions = ['.json', '.txt']
+  const validExtensions = ['.json', '.txt', '.pdf']
   const fileExtension = '.' + file.name.split('.').pop()?.toLowerCase()
   if (!validExtensions.includes(fileExtension)) {
     return `Invalid file extension. Supported: ${validExtensions.join(', ')}`

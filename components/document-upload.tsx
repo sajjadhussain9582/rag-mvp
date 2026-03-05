@@ -97,7 +97,7 @@ export function DocumentUpload({ onUploadSuccess, onError }: DocumentUploadProps
     const file = e.target.files?.[0]
     if (!file) return
 
-    const maxSizeBytes = 10 * 1024 * 1024 // 10 MB
+    const maxSizeBytes = 20 * 1024 * 1024 // 20 MB
     if (file.size > maxSizeBytes) {
       const maxSizeMB = maxSizeBytes / 1024 / 1024
       const fileSizeMB = file.size / 1024 / 1024
@@ -105,9 +105,10 @@ export function DocumentUpload({ onUploadSuccess, onError }: DocumentUploadProps
       return
     }
 
-    const allowedTypes = ['application/json', 'text/plain', 'text/json']
-    if (!allowedTypes.includes(file.type)) {
-      onError?.(`Invalid file type: ${file.type}. Supported: JSON, TXT`)
+    const allowedTypes = ['application/json', 'text/plain', 'text/json', 'application/pdf']
+    const isPdfByExtension = file.name.toLowerCase().endsWith('.pdf')
+    if (!allowedTypes.includes(file.type) && !isPdfByExtension) {
+      onError?.(`Invalid file type: ${file.type}. Supported: JSON, TXT, PDF`)
       return
     }
 
@@ -151,7 +152,7 @@ export function DocumentUpload({ onUploadSuccess, onError }: DocumentUploadProps
         <div>
           <h3 className="font-semibold text-slate-900">Upload Documents</h3>
           <p className="text-xs text-slate-600">
-            Supported formats: JSON, TXT
+            Supported formats: JSON, TXT, PDF
           </p>
         </div>
 
@@ -159,7 +160,7 @@ export function DocumentUpload({ onUploadSuccess, onError }: DocumentUploadProps
           <input
             ref={fileInputRef}
             type="file"
-            accept=".json,.txt"
+            accept=".json,.txt,.pdf"
             onChange={handleFileChange}
             disabled={isLoading}
             className="hidden"
